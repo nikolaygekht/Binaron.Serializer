@@ -422,6 +422,10 @@ namespace Binaron.Serializer
                             if (elementInfo.ParameterPosition >= 0)
                                 constructorParameters[elementInfo.ParameterPosition] = obj;
                         }
+                        else
+                            Discarder.DiscardValue(reader);
+                        
+                            
                     }
                     return constructor.Invoke(constructorParameters);
                 }
