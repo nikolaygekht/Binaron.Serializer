@@ -184,7 +184,6 @@ namespace Binaron.Serializer.Tests
 
             public ReadOnlyClass(int intValue, string stringValue) : this(intValue, stringValue, null)
             {
-                ;
             }
 
             [JsonConstructor]
@@ -202,7 +201,7 @@ namespace Binaron.Serializer.Tests
 
             public ReadOnlyClass Aggregate { get; }
 
-            [JsonConstructor]
+            [BinaronConstructor]
             public ReadOnlyClass1(int intValue, ReadOnlyClass aggregate)
             {
                 IntValue = intValue;

@@ -288,16 +288,24 @@ namespace Binaron.Serializer
                 if (typeInfo.ActualType.IsValueType && typeInfo.ActualType.GetCustomAttribute<IsReadOnlyAttribute>() != null)
                     return new ReadOnlyReader(typeInfo.ActualType);
 
-                //if object has no default constructor && has a constructor market with JsonDeserializer
+                //if object has no default constructor && has a constructor marked with JsonDeserializer
                 if (!typeInfo.ActualType.IsValueType && typeInfo.ActualType.GetConstructor(Array.Empty<Type>()) == null)
                 {
                     var constructors = type.GetConstructors();
+                    ConstructorInfo jsonConstuctor = null, binaronConstructor = null;
                     foreach (var constructor in constructors)
                     {
-                        var attributes = constructor.GetCustomAttributes();
-                        if (attributes.Any(attribute => attribute.GetType().Name.EndsWith("JsonConstructorAttribute")))
-                            return new ReadOnlyReader(typeInfo.ActualType);
+                        foreach (var attribute in constructor.GetCustomAttributes())
+                        {
+                            if (attribute is BinaronConstructorAttribute)
+                                binaronConstructor = constructor;
+                            if (attribute.GetType().Name.EndsWith("JsonConstructorAttribute"))
+                                jsonConstuctor = constructor;
+                        }
                     }
+                    var constructor1 = binaronConstructor ?? jsonConstuctor;
+                    if (constructor1 != null)
+                        return new ReadOnlyReader(typeInfo.ActualType, constructor1);
                 }
 
                 return new ObjectReader(type, typeInfo.Activate, typeInfo.Setters);
@@ -319,24 +327,61 @@ namespace Binaron.Serializer
                     }
                 }
 
-                private readonly Type type;
-                private readonly Dictionary<string, ElementInformation> propertiesInfo = new Dictionary<string, ElementInformation>();
-                private readonly ConstructorInfo constructor;
-                private readonly int constructorParametersCount;
+                private readonly Type Type;
+                private readonly Dictionary<string, ElementInformation> PropertiesInfo = new Dictionary<string, ElementInformation>();
+                private readonly ConstructorInfo Constructor;
+                private readonly int ConstructorParametersCount;
 
-                public ReadOnlyReader(Type type)
+                public ReadOnlyReader(Type type) : this(type, null)
+                {
+
+                }
+
+                public ReadOnlyReader(Type type, ConstructorInfo constructor)
                 {
                     var properties = new List<(string name, Type target)>();
 
-                    this.type = type;
+                    this.Type = type;
                     foreach (var property in type.GetProperties())
                         properties.Add((property.Name, property.PropertyType));
 
                     foreach (var field in type.GetFields())
                         properties.Add((field.Name, field.FieldType));
 
-                    //find a constructor which has the maximum number
-                    //of the parameters named as the fields/properties. 
+                    if (constructor == null)
+                    {
+                        constructor = FindBestMatch(type, properties);
+                        if (constructor == null)
+                            throw new ArgumentException($"The constructor with the parameters that matches at least one of the properties is not found in the type {type.FullName}", nameof(type));
+                    }
+
+                    Constructor = constructor;
+
+
+                    var parameters = constructor.GetParameters();
+                    ConstructorParametersCount = parameters.Length;
+
+                    //find position of the parameter in the best
+                    //matching constructor and create a dictionary entry
+                    for (int i = 0; i < properties.Count; i++)
+                    {
+                        int parameterPosition = -1;
+                        for (int j = 0; j < ConstructorParametersCount; j++)
+                        {
+                            if (string.Compare(properties[i].name, parameters[j].Name, true) == 0)
+                            {
+                                parameterPosition = i;
+                                break;
+                            }
+                        }
+                        PropertiesInfo.Add(properties[i].name, new ElementInformation(properties[i].target, CreateReader(properties[i].target), parameterPosition));
+                    }
+                }
+            
+
+                // Finds a constructor which has the maximum number
+                private static ConstructorInfo FindBestMatch(Type type, List<(string name, Type target)> properties)
+                {
                     ConstructorInfo[] constructors = type.GetConstructors();
                     int[] scores = new int[constructors.Length];
 
@@ -361,16 +406,16 @@ namespace Binaron.Serializer
                         }
                     }
 
-                    ConstructorInfo bestMatching = null;
+                    ConstructorInfo bestMatching = null, jsonConstructor = null, binaronConstructor = null;
                     int bestMatchingScore = 0;
 
                     for (int i = 0; i < scores.Length; i++)
                     {
                         if (constructors[i].GetCustomAttributes().Any(attribute => attribute.GetType().Name.EndsWith("JsonConstructorAttribute")))
-                        {
-                            bestMatching = constructors[i];
-                            break;
-                        }    
+                            jsonConstructor = constructors[i];
+
+                        if (constructors[i].GetCustomAttribute<BinaronConstructorAttribute>() != null)
+                            binaronConstructor = constructors[i];
 
                         if (scores[i] > bestMatchingScore)
                         {
@@ -379,42 +424,18 @@ namespace Binaron.Serializer
                         }
                     }
 
-                    if (bestMatching == null)
-                        throw new ArgumentException($"The constructor with the parameters that matches at least one of the properties is not found in the type {type.FullName}", nameof(type));
-                    else
-                    {
-                        constructor = bestMatching;
-                        var parameters = constructor.GetParameters();
-                        constructorParametersCount = parameters.Length;
-
-                        //find position of the parameter in the best
-                        //matching constructor and create a dictionary entry
-                        for (int i = 0; i < properties.Count; i++)
-                        {
-                            int parameterPosition = -1;
-                            for (int j = 0; j < constructorParametersCount; j++)
-                            {
-                                if (string.Compare(properties[i].name, parameters[j].Name, true) == 0)
-                                {
-                                    parameterPosition = i;
-                                    break;
-                                }
-                            }
-                            propertiesInfo.Add(properties[i].name, new ElementInformation(properties[i].target, CreateReader(properties[i].target), parameterPosition));
-                        }
-                    }
+                    return (binaronConstructor ?? jsonConstructor) ?? bestMatching;
                 }
 
                 public object Read(ReaderState reader)
                 {
-                    object[] noParams = Array.Empty<object>();
-                    object[] constructorParameters = new object[constructorParametersCount];
+                    object[] constructorParameters = new object[ConstructorParametersCount];
 
                     while (Reader.ReadEnumerableType(reader) == EnumerableType.HasItem)
                     {
                         object obj = null;
                         var key = reader.ReadString();
-                        if (propertiesInfo.TryGetValue(key, out ElementInformation elementInfo))
+                        if (PropertiesInfo.TryGetValue(key, out ElementInformation elementInfo))
                         {
                             obj = elementInfo.Reader(reader);
                             if (obj == null || obj.GetType() != elementInfo.TargetType)
@@ -424,10 +445,8 @@ namespace Binaron.Serializer
                         }
                         else
                             Discarder.DiscardValue(reader);
-                        
-                            
                     }
-                    return constructor.Invoke(constructorParameters);
+                    return Constructor.Invoke(constructorParameters);
                 }
 
                 private static Func<ReaderState, object> CreateReader(Type type)
